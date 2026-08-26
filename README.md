@@ -1,91 +1,58 @@
 # Fruit Image Classification System
 
-This project runs from **one Streamlit Python file: `app.py`** and is rebuilt around the supplied fruit dataset.
+This project runs from **one Streamlit Python file: `app.py`**.
 
-## Dataset format
+The supplied fruit dataset contains image-level labels in `_classes.csv`. It does not contain bounding-box coordinates, so this rebuild uses **image classification** rather than object detection.
 
-The supplied archive contains fruit images and image-level labels in `_classes.csv` files. It does **not** contain YOLO bounding-box `.txt` annotations, so this project correctly uses **YOLO image classification** rather than bounding-box detection.
+## Model stack
 
-Classes:
+- Streamlit
+- PyTorch
+- Torchvision
+- MobileNetV3-Small
+- KaggleHub
+- Pandas
+- Pillow
 
-- Apple
-- Banana
-- Grapes
-- Kiwi
-- Mango
-- Orange
-- Pineapple
-- Sugerapple
-- Watermelon
+OpenCV and Ultralytics are intentionally not used, which removes the previous `cv2` deployment problem.
 
-The importer converts the CSV labels into the folder structure expected by Ultralytics classification:
+## Fruit classes
 
-```text
-train/ClassName/
-val/ClassName/
-test/ClassName/
-```
+Apple, Banana, Grapes, Kiwi, Mango, Orange, Pineapple, Sugerapple, Watermelon.
 
-## Files
-
-```text
-backupplan/
-├── app.py
-├── requirements.txt
-├── packages.txt
-├── runtime.txt
-├── .python-version
-├── .gitignore
-└── README.md
-```
-
-Only `app.py` is executed by Streamlit.
-
-## Streamlit Cloud runtime
-
-This repository is configured for **Python 3.12** because the Ultralytics/OpenCV stack may fail under Python 3.14.
-
-- `runtime.txt` requests Python 3.12.
-- `.python-version` also declares Python 3.12.
-- `packages.txt` installs Linux libraries required by OpenCV.
-- `app.py` imports Ultralytics lazily so a bad ML runtime no longer crashes the entire Streamlit page at startup.
-
-If an already-deployed Streamlit app is still using Python 3.14, reboot/redeploy it. If the old runtime is retained, open the Streamlit app settings and redeploy using Python 3.12.
-
-## Install locally
+## Run locally
 
 ```bash
 pip install -r requirements.txt
-```
-
-## Run
-
-```bash
 streamlit run app.py
 ```
 
-## Dataset workflow
+## Streamlit workflow
 
-Open **Dataset & Training** in the sidebar. You can either:
+### Dataset & Training
 
-1. Upload the supplied `archive.zip`, or
-2. Download the same public Kaggle dataset from `kapturovalexander/fruits-by-yolo-fruits-detection`.
+1. Upload the supplied `archive.zip`, or download the same Kaggle dataset.
+2. The app reads `_classes.csv`.
+3. It automatically creates `train/ClassName`, `val/ClassName`, and `test/ClassName` folders.
+4. Choose epochs, image size, batch size, and learning rate.
+5. Train MobileNetV3-Small.
+6. Download `best_model.pth`.
 
-The app reads `_classes.csv`, prepares the class folders, and then trains a YOLO classification model.
+For a quick Streamlit Cloud test, start with:
 
-For a quick Streamlit Cloud test, use:
+- Epochs: 1-3
+- Image size: 160 or 224
+- Batch size: 8
+- Learning rate: 0.001
 
-- Model: `yolo11n-cls.pt`
-- Epochs: `3`
-- Image size: `224`
-- Batch size: `8`
+### Fruit Recognition
 
-## Recognition workflow
-
-After training, open **Fruit Recognition**:
-
-1. Use the trained `best.pt` or upload a classification `.pt` model.
+1. Use the trained `best_model.pth` or upload a compatible `.pth` model.
 2. Upload a fruit image.
 3. Click **Recognize Fruit**.
-4. Streamlit displays the predicted fruit, confidence, and Top-5 probabilities.
-5. Download the prediction results as CSV if needed.
+4. View the predicted fruit, confidence, and Top-5 probabilities.
+5. Download the prediction CSV if required.
+
+## Deployment note
+
+Streamlit Community Cloud chooses the Python version in its deployment settings. The repository therefore does not use `.python-version` or `runtime.txt`. The current dependency set supports modern Streamlit Cloud Python environments and does not require OpenCV system packages.
