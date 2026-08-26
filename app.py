@@ -23,11 +23,11 @@ ROOT = Path.cwd()
 RUNTIME = ROOT / ".runtime"
 RAW = RUNTIME / "raw"
 PREPARED = RUNTIME / "fruit_dataset"
-RUNS = RUNTIME / "runs"
 REPORT_FILE = RUNTIME / "report.json"
 ZIP_FILE = RUNTIME / "archive.zip"
-BEST_MODEL = RUNS / "train" / "weights" / "best.pt"
-UPLOADED_MODEL = RUNTIME / "uploaded_model.pt"
+MODEL_DIR = RUNTIME / "model"
+BEST_MODEL = MODEL_DIR / "best_model.pth"
+UPLOADED_MODEL = RUNTIME / "uploaded_model.pth"
 
 SPLITS = {
     "train": "train",
@@ -55,35 +55,27 @@ st.set_page_config(
 
 st.title("🍎 Fruit Image Classification System")
 st.caption(
-    "One Streamlit app: import dataset → prepare labels → train YOLO classifier → recognize fruit."
+    "One Streamlit app: import dataset → prepare labels → train MobileNetV3 → recognize fruit."
 )
 
-# Do not import Ultralytics at module startup. This keeps Streamlit alive even
-# if an incompatible Python/OpenCV environment is selected on the deployment.
-if sys.version_info >= (3, 14):
-    st.error(
-        "This deployment is currently using Python "
-        f"{PYTHON_VERSION}. Ultralytics/OpenCV can fail to import in this "
-        "environment. This repository is configured for Python 3.12. "
-        "Reboot/redeploy the Streamlit app so the new runtime is used."
-    )
-
 
 # ============================================================
-# ML IMPORT
+# PYTORCH IMPORT
 # ============================================================
-def get_yolo_class():
-    """Import Ultralytics only when training or prediction is requested."""
+def get_ml():
+    """Import PyTorch/Torchvision only when model work is requested."""
     try:
-        from ultralytics import YOLO
+        import torch
+        from torch import nn
+        from torch.utils.data import DataLoader
+        from torchvision import datasets, models, transforms
 
-        return YOLO
+        return torch, nn, DataLoader, datasets, models, transforms
     except Exception as error:
         raise RuntimeError(
-            "Ultralytics/OpenCV could not be loaded. The project is configured "
-            "for Python 3.12 and includes the Linux OpenCV libraries required by "
-            "Streamlit Cloud. Reboot/redeploy the app after the latest GitHub "
-            f"update. Current Python: {PYTHON_VERSION}. Original error: {error}"
+            "PyTorch/Torchvision could not be loaded. Reboot the Streamlit app "
+            "after the latest GitHub dependency update. "
+            f"Python: {PYTHON_VERSION}. Original error: {error}"
         ) from error
 
 
@@ -91,7 +83,7 @@ def get_yolo_class():
 # DATASET HELPERS
 # ============================================================
 def safe_extract(zip_path: Path, destination: Path) -> None:
-    """Extract a ZIP while blocking path traversal."""
+    """Extract ZIP safely, blocking path traversal."""
     destination.mkdir(parents=True, exist_ok=True)
     destination_root = destination.resolve()
 
@@ -103,8 +95,8 @@ def safe_extract(zip_path: Path, destination: Path) -> None:
         archive.extractall(destination)
 
 
-def clear_runtime(clear_models: bool = False) -> None:
-    """Remove imported/prepared data and optionally trained models."""
+def clear_runtime(clear_model: bool = False) -> None:
+    """Clear imported/prepared data and optionally the trained model."""
     for path in (RAW, PREPARED):
         if path.exists():
             shutil.rmtree(path)
@@ -113,12 +105,15 @@ def clear_runtime(clear_models: bool = False) -> None:
         if path.exists():
             path.unlink()
 
-    if clear_models and RUNS.exists():
-        shutil.rmtree(RUNS)
+    if clear_model and MODEL_DIR.exists():
+        shutil.rmtree(MODEL_DIR)
+
+    if clear_model and UPLOADED_MODEL.exists():
+        UPLOADED_MODEL.unlink()
 
 
 def link_or_copy(source: Path, destination: Path) -> None:
-    """Hard-link images when possible, otherwise copy them."""
+    """Hard-link images when possible to save space; otherwise copy."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.link(source, destination)
@@ -127,14 +122,12 @@ def link_or_copy(source: Path, destination: Path) -> None:
 
 
 def prepare_dataset(source: Path, source_name: str) -> dict:
-    """
-    Convert the supplied _classes.csv layout into YOLO classification folders:
-    train/ClassName, val/ClassName and test/ClassName.
-    """
+    """Convert _classes.csv into train/ClassName, val/ClassName, test/ClassName."""
     csv_files = sorted(source.rglob("_classes.csv"))
     if not csv_files:
         raise FileNotFoundError(
-            "No _classes.csv files were found. Please upload the supplied archive.zip."
+            "No _classes.csv files were found. Upload the supplied archive.zip "
+            "or use the Kaggle download option."
         )
 
     if PREPARED.exists():
@@ -172,19 +165,13 @@ def prepare_dataset(source: Path, source_name: str) -> dict:
                         value = float((row.get(raw_header) or "0").strip() or 0)
                     except ValueError:
                         value = 0.0
-
                     if value > 0.5:
                         active_classes.append(clean_name)
 
                 image_path = csv_path.parent / filename
-
                 if not filename or not image_path.exists():
                     skipped.append(
-                        {
-                            "split": split,
-                            "file": filename,
-                            "reason": "missing image",
-                        }
+                        {"split": split, "file": filename, "reason": "missing image"}
                     )
                     continue
 
@@ -195,11 +182,7 @@ def prepare_dataset(source: Path, source_name: str) -> dict:
                         else "multiple labels: " + ", ".join(active_classes)
                     )
                     skipped.append(
-                        {
-                            "split": split,
-                            "file": filename,
-                            "reason": reason,
-                        }
+                        {"split": split, "file": filename, "reason": reason}
                     )
                     continue
 
@@ -209,24 +192,28 @@ def prepare_dataset(source: Path, source_name: str) -> dict:
                 counts[(split, label)] += 1
 
     if not (PREPARED / "train").exists():
-        raise RuntimeError("Training images could not be prepared from the CSV files.")
-
+        raise RuntimeError("Training images could not be prepared.")
     if not (PREPARED / "val").exists():
-        raise RuntimeError("Validation images could not be prepared from the CSV files.")
+        raise RuntimeError("Validation images could not be prepared.")
 
     report = {
         "source": source_name,
-        "classes": classes,
+        "classes": sorted(classes),
         "usable": sum(counts.values()),
         "skipped": skipped,
         "totals": {
             split: sum(
-                count for (current_split, _), count in counts.items() if current_split == split
+                count
+                for (current_split, _), count in counts.items()
+                if current_split == split
             )
             for split in ("train", "val", "test")
         },
         "counts": {
-            split: {class_name: counts.get((split, class_name), 0) for class_name in classes}
+            split: {
+                class_name: counts.get((split, class_name), 0)
+                for class_name in sorted(classes)
+            }
             for split in ("train", "val", "test")
         },
     }
@@ -239,7 +226,6 @@ def prepare_dataset(source: Path, source_name: str) -> dict:
 def load_report() -> dict | None:
     if not REPORT_FILE.exists():
         return None
-
     try:
         return json.loads(REPORT_FILE.read_text(encoding="utf-8"))
     except Exception:
@@ -267,37 +253,172 @@ def distribution(report: dict) -> pd.DataFrame:
 # ============================================================
 # MODEL HELPERS
 # ============================================================
-def train_model(epochs: int, image_size: int, batch_size: int, model_name: str) -> Path:
+def create_model(num_classes: int, use_pretrained: bool = True):
+    _, nn, _, _, models, _ = get_ml()
+
+    weights = None
+    if use_pretrained:
+        try:
+            weights = models.MobileNet_V3_Small_Weights.DEFAULT
+        except Exception:
+            weights = None
+
+    try:
+        model = models.mobilenet_v3_small(weights=weights)
+    except Exception:
+        model = models.mobilenet_v3_small(weights=None)
+
+    in_features = model.classifier[-1].in_features
+    model.classifier[-1] = nn.Linear(in_features, num_classes)
+    return model
+
+
+def build_transforms(image_size: int):
+    _, _, _, _, _, transforms = get_ml()
+
+    train_transform = transforms.Compose(
+        [
+            transforms.Resize((image_size, image_size)),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(10),
+            transforms.ColorJitter(brightness=0.15, contrast=0.15),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
+            ),
+        ]
+    )
+
+    eval_transform = transforms.Compose(
+        [
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
+            ),
+        ]
+    )
+    return train_transform, eval_transform
+
+
+def train_model(
+    epochs: int,
+    image_size: int,
+    batch_size: int,
+    learning_rate: float,
+) -> tuple[Path, list[dict[str, float]]]:
     if not dataset_ready():
         raise RuntimeError("Import and prepare the dataset first.")
 
-    YOLO = get_yolo_class()
+    torch, nn, DataLoader, datasets, _, _ = get_ml()
+    train_transform, eval_transform = build_transforms(image_size)
 
-    training_run = RUNS / "train"
-    if training_run.exists():
-        shutil.rmtree(training_run)
+    train_set = datasets.ImageFolder(PREPARED / "train", transform=train_transform)
+    val_set = datasets.ImageFolder(PREPARED / "val", transform=eval_transform)
 
-    model = YOLO(model_name)
-    model.train(
-        data=str(PREPARED.resolve()),
-        epochs=epochs,
-        imgsz=image_size,
-        batch=batch_size,
-        project=str(RUNS.resolve()),
-        name="train",
-        exist_ok=True,
-        patience=10,
-        pretrained=True,
-        plots=True,
+    if train_set.classes != val_set.classes:
+        raise RuntimeError("Training and validation class folders do not match.")
+
+    train_loader = DataLoader(
+        train_set,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=0,
+    )
+    val_loader = DataLoader(
+        val_set,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
     )
 
-    if not BEST_MODEL.exists():
-        raise FileNotFoundError("Training finished but best.pt was not created.")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = create_model(len(train_set.classes), use_pretrained=True).to(device)
 
-    return BEST_MODEL
+    for parameter in model.features.parameters():
+        parameter.requires_grad = False
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(
+        filter(lambda parameter: parameter.requires_grad, model.parameters()),
+        lr=learning_rate,
+    )
+
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    best_accuracy = -1.0
+    history: list[dict[str, float]] = []
+
+    for epoch in range(1, epochs + 1):
+        model.train()
+        running_loss = 0.0
+        correct = 0
+        total = 0
+
+        for inputs, labels in train_loader:
+            inputs = inputs.to(device)
+            labels = labels.to(device)
+
+            optimizer.zero_grad(set_to_none=True)
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            running_loss += float(loss.item()) * inputs.size(0)
+            correct += int((outputs.argmax(1) == labels).sum().item())
+            total += int(labels.size(0))
+
+        train_loss = running_loss / max(total, 1)
+        train_accuracy = correct / max(total, 1)
+
+        model.eval()
+        val_loss_sum = 0.0
+        val_correct = 0
+        val_total = 0
+
+        with torch.inference_mode():
+            for inputs, labels in val_loader:
+                inputs = inputs.to(device)
+                labels = labels.to(device)
+                outputs = model(inputs)
+                loss = criterion(outputs, labels)
+
+                val_loss_sum += float(loss.item()) * inputs.size(0)
+                val_correct += int((outputs.argmax(1) == labels).sum().item())
+                val_total += int(labels.size(0))
+
+        val_loss = val_loss_sum / max(val_total, 1)
+        val_accuracy = val_correct / max(val_total, 1)
+
+        history.append(
+            {
+                "Epoch": epoch,
+                "Train Loss": round(train_loss, 4),
+                "Train Accuracy (%)": round(train_accuracy * 100, 2),
+                "Validation Loss": round(val_loss, 4),
+                "Validation Accuracy (%)": round(val_accuracy * 100, 2),
+            }
+        )
+
+        if val_accuracy > best_accuracy:
+            best_accuracy = val_accuracy
+            torch.save(
+                {
+                    "architecture": "mobilenet_v3_small",
+                    "model_state_dict": model.state_dict(),
+                    "classes": train_set.classes,
+                    "image_size": image_size,
+                    "validation_accuracy": val_accuracy,
+                },
+                BEST_MODEL,
+            )
+
+    return BEST_MODEL, history
 
 
-def save_model(uploaded_file) -> Path:
+def save_uploaded_model(uploaded_file) -> Path:
     RUNTIME.mkdir(parents=True, exist_ok=True)
     with UPLOADED_MODEL.open("wb") as file:
         uploaded_file.seek(0)
@@ -305,34 +426,54 @@ def save_model(uploaded_file) -> Path:
     return UPLOADED_MODEL
 
 
+def load_checkpoint(model_path: Path):
+    torch, _, _, _, _, _ = get_ml()
+    checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
+
+    classes = checkpoint.get("classes")
+    image_size = int(checkpoint.get("image_size", 224))
+    if not classes:
+        raise RuntimeError("Model file does not contain fruit class names.")
+
+    model = create_model(len(classes), use_pretrained=False)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+    return model, list(classes), image_size
+
+
 def predict(model_path: Path, image: Image.Image) -> pd.DataFrame:
-    YOLO = get_yolo_class()
-    result = YOLO(str(model_path)).predict(
-        source=image,
-        imgsz=224,
-        verbose=False,
-    )[0]
+    torch, _, _, _, _, transforms = get_ml()
+    model, classes, image_size = load_checkpoint(model_path)
 
-    if result.probs is None:
-        raise RuntimeError("This .pt file is not a YOLO classification model.")
-
-    probabilities = result.probs.data.detach().cpu().tolist()
-    top_indexes = sorted(
-        range(len(probabilities)),
-        key=lambda index: probabilities[index],
-        reverse=True,
-    )[:5]
-
-    return pd.DataFrame(
+    transform = transforms.Compose(
         [
-            {
-                "Rank": rank,
-                "Fruit": str(result.names[index]),
-                "Confidence (%)": round(probabilities[index] * 100, 2),
-            }
-            for rank, index in enumerate(top_indexes, 1)
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
+            ),
         ]
     )
+
+    tensor = transform(image).unsqueeze(0)
+    with torch.inference_mode():
+        logits = model(tensor)
+        probabilities = torch.softmax(logits, dim=1)[0]
+
+    k = min(5, len(classes))
+    values, indexes = torch.topk(probabilities, k=k)
+
+    rows = []
+    for rank, (value, index) in enumerate(zip(values.tolist(), indexes.tolist()), 1):
+        rows.append(
+            {
+                "Rank": rank,
+                "Fruit": classes[index],
+                "Confidence (%)": round(float(value) * 100, 2),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 # ============================================================
@@ -347,7 +488,7 @@ page = st.sidebar.radio(
 st.sidebar.markdown("---")
 st.sidebar.caption("Runtime")
 st.sidebar.code(f"Python {PYTHON_VERSION}", language=None)
-st.sidebar.caption("Single Streamlit file")
+st.sidebar.caption("Single Streamlit entry point")
 st.sidebar.code("streamlit run app.py", language=None)
 
 
@@ -358,17 +499,18 @@ if page == "🏠 Home":
     st.subheader("Assignment Overview")
     st.markdown(
         """
-        The supplied dataset contains fruit images with **image-level labels in
-        `_classes.csv`**. It does not contain YOLO bounding-box text annotations,
-        so this project correctly uses **YOLO image classification**.
+        The supplied fruit dataset contains **image-level labels in `_classes.csv`**.
+        Because it does not contain object bounding-box coordinates, the technically
+        correct task is **fruit image classification**.
 
-        Everything runs through this single `app.py` Streamlit application.
+        This rebuild uses **PyTorch + Torchvision MobileNetV3** and does not use
+        OpenCV or Ultralytics, avoiding the `cv2` deployment error.
         """
     )
 
     column1, column2, column3 = st.columns(3)
     column1.metric("Application", "Streamlit")
-    column2.metric("AI Model", "YOLO Classification")
+    column2.metric("Model", "MobileNetV3-Small")
     column3.metric("Fruit Classes", "9")
 
     st.write(
@@ -382,11 +524,11 @@ if page == "🏠 Home":
         ↓
 Read _classes.csv
         ↓
-Prepare train/Class, val/Class, test/Class folders
+Prepare train/Class, val/Class, test/Class
         ↓
-Train YOLO classification model
+Train MobileNetV3 classifier
         ↓
-best.pt
+best_model.pth
         ↓
 Upload fruit image
         ↓
@@ -401,8 +543,8 @@ Predicted fruit + confidence + Top-5 results""",
 elif page == "📦 Dataset & Training":
     st.subheader("📦 Import and Prepare Dataset")
     st.info(
-        "The app uses the real `_classes.csv` labels and converts them into "
-        "the folder structure required for YOLO classification."
+        "Upload the supplied archive.zip or download the same Kaggle dataset. "
+        "The app reads `_classes.csv` and prepares classification folders automatically."
     )
 
     source = st.radio(
@@ -491,58 +633,65 @@ elif page == "📦 Dataset & Training":
                 )
 
         st.markdown("---")
-        st.subheader("🚀 Train YOLO Classifier")
+        st.subheader("🚀 Train Fruit Classifier")
 
         left, right = st.columns(2)
         with left:
             epochs = st.number_input(
                 "Epochs",
                 min_value=1,
-                max_value=200,
+                max_value=50,
                 value=3,
                 step=1,
             )
-            image_size = st.selectbox("Image size", [160, 224, 320], index=1)
+            image_size = st.selectbox("Image size", [160, 192, 224], index=2)
 
         with right:
-            batch_size = st.selectbox("Batch size", [2, 4, 8, 16], index=2)
-            model_name = st.selectbox(
-                "Pretrained model",
-                ["yolo11n-cls.pt", "yolo11s-cls.pt", "yolo11m-cls.pt"],
-                index=0,
+            batch_size = st.selectbox("Batch size", [4, 8, 16], index=1)
+            learning_rate = st.selectbox(
+                "Learning rate",
+                [0.0005, 0.001, 0.002],
+                index=1,
             )
 
-        st.warning(
-            "For Streamlit Cloud, start with yolo11n-cls.pt, 3 epochs, "
-            "224 image size and batch size 8. Training runs on limited cloud resources."
+        st.caption(
+            "Streamlit Cloud is CPU-based. Start with 1-3 epochs and batch size 8. "
+            "The feature extractor is frozen to make training lighter."
         )
 
         if st.button("🚀 Start Training", type="primary"):
             try:
-                with st.spinner("Training classifier..."):
-                    best_model = train_model(
+                with st.spinner("Training MobileNetV3 classifier..."):
+                    best_model, history = train_model(
                         int(epochs),
                         int(image_size),
                         int(batch_size),
-                        model_name,
+                        float(learning_rate),
                     )
 
-                st.success("Training completed successfully.")
+                st.success("Training completed.")
+                history_df = pd.DataFrame(history)
+                st.dataframe(history_df, use_container_width=True, hide_index=True)
+
+                if not history_df.empty:
+                    st.line_chart(
+                        history_df.set_index("Epoch")[
+                            ["Train Accuracy (%)", "Validation Accuracy (%)"]
+                        ]
+                    )
+
                 with best_model.open("rb") as file:
                     st.download_button(
-                        "⬇️ Download best.pt",
+                        "⬇️ Download best_model.pth",
                         data=file.read(),
-                        file_name="best.pt",
+                        file_name="best_model.pth",
                         mime="application/octet-stream",
                     )
             except Exception as error:
                 st.error(f"Training failed: {error}")
 
-    st.markdown("---")
-    if st.button("🧹 Clear Runtime Data and Models"):
+    if st.button("🧹 Clear Runtime Data and Model"):
         clear_runtime(True)
-        if UPLOADED_MODEL.exists():
-            UPLOADED_MODEL.unlink()
         st.rerun()
 
 
@@ -554,22 +703,28 @@ else:
 
     model_source = st.radio(
         "Model source",
-        ["Use trained best.pt", "Upload classification .pt"],
+        ["Use trained best_model.pth", "Upload .pth model"],
         horizontal=True,
     )
 
     model_path: Path | None = None
 
-    if model_source == "Use trained best.pt":
+    if model_source == "Use trained best_model.pth":
         if BEST_MODEL.exists():
             model_path = BEST_MODEL
-            st.success("Trained best.pt found.")
+            st.success("Trained model found.")
         else:
-            st.warning("Train the classifier first or upload a classification model.")
+            st.warning(
+                "No trained model found. Train the classifier first or upload a .pth model."
+            )
     else:
-        uploaded_model = st.file_uploader("Upload .pt model", type=["pt"])
+        uploaded_model = st.file_uploader(
+            "Upload PyTorch model",
+            type=["pth"],
+            key="model_upload",
+        )
         if uploaded_model is not None:
-            model_path = save_model(uploaded_model)
+            model_path = save_uploaded_model(uploaded_model)
             st.success(f"Loaded {uploaded_model.name}")
 
     uploaded_image = st.file_uploader(
@@ -592,34 +747,31 @@ else:
         ):
             try:
                 with st.spinner("Classifying image..."):
-                    predictions = predict(model_path, image)
+                    result_df = predict(model_path, image)
 
-                top_prediction = predictions.iloc[0]
+                top = result_df.iloc[0]
 
                 with right:
                     st.success("Prediction complete")
-                    st.metric("Predicted Fruit", top_prediction["Fruit"])
+                    st.metric("Predicted Fruit", top["Fruit"])
                     st.metric(
                         "Confidence",
-                        f"{top_prediction['Confidence (%)']:.2f}%",
+                        f"{float(top['Confidence (%)']):.2f}%",
                     )
 
                 st.subheader("Top-5 Predictions")
                 st.dataframe(
-                    predictions,
+                    result_df,
                     use_container_width=True,
                     hide_index=True,
                 )
-                st.bar_chart(
-                    predictions.set_index("Fruit")[["Confidence (%)"]]
-                )
+                st.bar_chart(result_df.set_index("Fruit")[["Confidence (%)"]])
 
                 st.download_button(
                     "⬇️ Download Prediction CSV",
-                    data=predictions.to_csv(index=False).encode("utf-8"),
+                    data=result_df.to_csv(index=False).encode("utf-8"),
                     file_name="fruit_prediction.csv",
                     mime="text/csv",
                 )
-
             except Exception as error:
                 st.error(f"Recognition failed: {error}")
