@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+data/
+runs/
+output/
+
+*.pt
+*.onnx
+*.engine
+
+.DS_Store
+Thumbs.db
