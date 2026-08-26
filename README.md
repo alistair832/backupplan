@@ -2,11 +2,14 @@
 
 This project uses Python and Ultralytics YOLO to detect and count fruits in an image.
 
-Dataset: [Fruits by YOLO - Fruits Detection](https://www.kaggle.com/datasets/kapturovalexander/fruits-by-yolo-fruits-detection)
+**Direct Kaggle dataset:** [Fruits by YOLO - Fruits Detection](https://www.kaggle.com/datasets/kapturovalexander/fruits-by-yolo-fruits-detection)
+
+The project is directly connected to the Kaggle dataset through `kagglehub`. You do not need to manually download and extract the dataset ZIP.
 
 ## Functions
 
-- Download the Kaggle fruit dataset with Python
+- Directly download the Kaggle fruit dataset with Python
+- Automatically download the dataset when training if it is missing
 - Train a YOLO fruit detection model
 - Detect multiple fruits from an image
 - Draw bounding boxes around detected fruits
@@ -36,25 +39,35 @@ Python 3.10 or newer is recommended.
 pip install -r requirements.txt
 ```
 
-## 2. Download the Dataset
+## 2. Direct Dataset Download
+
+The project is linked to this Kaggle dataset:
+
+```text
+https://www.kaggle.com/datasets/kapturovalexander/fruits-by-yolo-fruits-detection
+```
+
+You can download it directly with:
 
 ```bash
 python download_dataset.py
 ```
 
-The dataset will be downloaded into:
+The dataset will be placed under:
 
 ```text
 data/fruits-yolo/
 ```
 
-The downloader will also print the location of the dataset YAML file. If the YAML path is different from the default path, update `DATA_YAML` inside `train.py`.
-
 ## 3. Train the YOLO Model
+
+You can also simply run:
 
 ```bash
 python train.py
 ```
+
+If the dataset is not already available, `train.py` automatically calls the Kaggle downloader, finds the YOLO `data.yaml`, and starts training.
 
 The trained model is normally saved at:
 
@@ -118,21 +131,21 @@ Total Fruits: 3
 ## Main Detection Flow
 
 ```text
+Kaggle Fruit Dataset
+    ↓
+Python + KaggleHub
+    ↓
+YOLO Training
+    ↓
+Trained best.pt
+    ↓
 Fruit Image
     ↓
-Python Program
+Python Detection
     ↓
-Load YOLO Model
+Bounding Boxes + Fruit Class
     ↓
-Detect Objects
-    ↓
-Draw Bounding Boxes
-    ↓
-Identify Fruit Class
-    ↓
-Confidence Score
-    ↓
-Count Fruits
+Confidence Score + Fruit Count
     ↓
 Save and Display Result
 ```
