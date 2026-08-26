@@ -67,10 +67,7 @@ def main():
     cv2.imwrite(str(output_file), annotated_image)
 
     print(f"\nDetected image saved to: {output_file}")
-
-    cv2.imshow("Fruit Detection", annotated_image)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+    print("Use `streamlit run app.py` for the interactive visual interface.")
 
 
 if __name__ == "__main__":
