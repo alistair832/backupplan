@@ -1,0 +1,7 @@
+streamlit>=1.49.0
+ultralytics>=8.3.0
+kagglehub>=1.0.0
+pandas>=2.2.0
+Pillow>=10.0.0
+PyYAML>=6.0.0
+opencv-python-headless>=4.10.0
