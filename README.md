@@ -1,12 +1,10 @@
 # Fruit Image Classification System
 
-This project is rebuilt around the supplied `archive.zip` dataset and runs from **one Streamlit Python file: `app.py`**.
+This project runs from **one Streamlit Python file: `app.py`** and is rebuilt around the supplied fruit dataset.
 
-## Important dataset finding
+## Dataset format
 
-The supplied archive contains 2,974 fruit images and image-level labels in three `_classes.csv` files. It does **not** contain YOLO bounding-box `.txt` annotations. Although the archive includes a detection-style `data.yaml`, the actual label format is classification data.
-
-Therefore this project correctly uses **YOLO image classification** rather than bounding-box object detection.
+The supplied archive contains fruit images and image-level labels in `_classes.csv` files. It does **not** contain YOLO bounding-box `.txt` annotations, so this project correctly uses **YOLO image classification** rather than bounding-box detection.
 
 Classes:
 
@@ -20,7 +18,13 @@ Classes:
 - Sugerapple
 - Watermelon
 
-The importer converts the CSV export into the folder layout expected by Ultralytics classification. The supplied archive has 2,960 directly usable single-label images; 14 zero-label or multi-label rows are skipped and shown in the Streamlit interface.
+The importer converts the CSV labels into the folder structure expected by Ultralytics classification:
+
+```text
+train/ClassName/
+val/ClassName/
+test/ClassName/
+```
 
 ## Files
 
@@ -28,13 +32,27 @@ The importer converts the CSV export into the folder layout expected by Ultralyt
 backupplan/
 ├── app.py
 ├── requirements.txt
+├── packages.txt
+├── runtime.txt
+├── .python-version
 ├── .gitignore
 └── README.md
 ```
 
 Only `app.py` is executed by Streamlit.
 
-## Install
+## Streamlit Cloud runtime
+
+This repository is configured for **Python 3.12** because the Ultralytics/OpenCV stack may fail under Python 3.14.
+
+- `runtime.txt` requests Python 3.12.
+- `.python-version` also declares Python 3.12.
+- `packages.txt` installs Linux libraries required by OpenCV.
+- `app.py` imports Ultralytics lazily so a bad ML runtime no longer crashes the entire Streamlit page at startup.
+
+If an already-deployed Streamlit app is still using Python 3.14, reboot/redeploy it. If the old runtime is retained, open the Streamlit app settings and redeploy using Python 3.12.
+
+## Install locally
 
 ```bash
 pip install -r requirements.txt
@@ -53,28 +71,14 @@ Open **Dataset & Training** in the sidebar. You can either:
 1. Upload the supplied `archive.zip`, or
 2. Download the same public Kaggle dataset from `kapturovalexander/fruits-by-yolo-fruits-detection`.
 
-The app does not train from the archive's incorrect detection YAML. Instead it:
+The app reads `_classes.csv`, prepares the class folders, and then trains a YOLO classification model.
 
-```text
-_classes.csv
-    ↓
-Read image-level class labels
-    ↓
-Prepare train/ClassName, val/ClassName, test/ClassName folders
-    ↓
-YOLO classification training
-    ↓
-best.pt
-```
-
-For a quick test, use:
+For a quick Streamlit Cloud test, use:
 
 - Model: `yolo11n-cls.pt`
-- Epochs: 3-5
-- Image size: 224
-- Batch size: 8
-
-For a fuller experiment, increase the epochs.
+- Epochs: `3`
+- Image size: `224`
+- Batch size: `8`
 
 ## Recognition workflow
 
@@ -85,7 +89,3 @@ After training, open **Fruit Recognition**:
 3. Click **Recognize Fruit**.
 4. Streamlit displays the predicted fruit, confidence, and Top-5 probabilities.
 5. Download the prediction results as CSV if needed.
-
-## Why there are no bounding boxes
-
-Bounding boxes require object-detection annotations such as YOLO `.txt` files containing class and box coordinates. The supplied archive has no such files; its `_classes.csv` files contain only image-level class labels. Creating fake bounding boxes would make the assignment technically incorrect.
