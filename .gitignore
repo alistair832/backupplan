@@ -6,6 +6,7 @@ venv/
 data/
 runs/
 output/
+.cache_models/
 
 *.pt
 *.onnx
