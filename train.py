@@ -2,20 +2,30 @@ from pathlib import Path
 
 from ultralytics import YOLO
 
+from download_dataset import OUTPUT_DIR, download_dataset, find_dataset_yaml
 
-DATA_YAML = "data/fruits-yolo/data.yaml"
+
 MODEL = "yolo11n.pt"
 EPOCHS = 50
 IMAGE_SIZE = 640
 
 
-def main():
-    data_file = Path(DATA_YAML)
+def get_data_yaml():
+    """Use the local Kaggle dataset if available; otherwise download it automatically."""
+    output_dir = Path(OUTPUT_DIR)
 
-    if not data_file.exists():
-        raise FileNotFoundError(
-            f"Dataset YAML not found: {DATA_YAML}. Run download_dataset.py first and update DATA_YAML if needed."
-        )
+    if output_dir.exists():
+        yaml_files = find_dataset_yaml(output_dir)
+        if yaml_files:
+            print(f"Using existing dataset: {yaml_files[0]}")
+            return yaml_files[0]
+
+    print("Fruit dataset not found locally. Downloading it from Kaggle automatically...")
+    return download_dataset()
+
+
+def main():
+    data_file = get_data_yaml()
 
     model = YOLO(MODEL)
 
