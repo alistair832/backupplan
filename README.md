@@ -1,140 +1,91 @@
-# Smart Fruit Detection and Counting System
+# Fruit Image Classification System
 
-This assignment uses **one Python file only (`app.py`)** as the Streamlit application.
+This project is rebuilt around the supplied `archive.zip` dataset and runs from **one Streamlit Python file: `app.py`**.
 
-The app combines:
+## Important dataset finding
 
-- Kaggle dataset download
-- YOLO dataset discovery
-- YOLO model training
-- trained model loading
-- fruit image upload
-- fruit object detection
-- bounding boxes and confidence scores
-- per-class fruit counting
-- detection details table
-- CSV result download
-- annotated image download
+The supplied archive contains 2,974 fruit images and image-level labels in three `_classes.csv` files. It does **not** contain YOLO bounding-box `.txt` annotations. Although the archive includes a detection-style `data.yaml`, the actual label format is classification data.
 
-## Dataset
+Therefore this project correctly uses **YOLO image classification** rather than bounding-box object detection.
 
-**Fruits by YOLO - Fruits Detection**
+Classes:
 
-https://www.kaggle.com/datasets/kapturovalexander/fruits-by-yolo-fruits-detection
+- Apple
+- Banana
+- Grapes
+- Kiwi
+- Mango
+- Orange
+- Pineapple
+- Sugerapple
+- Watermelon
 
-Kaggle dataset handle used in `app.py`:
+The importer converts the CSV export into the folder layout expected by Ultralytics classification. The supplied archive has 2,960 directly usable single-label images; 14 zero-label or multi-label rows are skipped and shown in the Streamlit interface.
 
-```text
-kapturovalexander/fruits-by-yolo-fruits-detection
-```
-
-## Project Structure
+## Files
 
 ```text
 backupplan/
 ├── app.py
 ├── requirements.txt
+├── .gitignore
 └── README.md
 ```
 
-Generated files such as the Kaggle dataset, YOLO training runs and `best.pt` are created when the application runs and do not need to be manually prepared first.
+Only `app.py` is executed by Streamlit.
 
 ## Install
-
-Python 3.10 or newer is recommended.
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Run Streamlit
-
-Only one Python file needs to be started:
+## Run
 
 ```bash
 streamlit run app.py
 ```
 
-The browser will open the Smart Fruit Detection and Counting System.
+## Dataset workflow
 
-## Functions Inside `app.py`
+Open **Dataset & Training** in the sidebar. You can either:
 
-### 1. Home
+1. Upload the supplied `archive.zip`, or
+2. Download the same public Kaggle dataset from `kapturovalexander/fruits-by-yolo-fruits-detection`.
 
-Shows the assignment overview, system functions and processing flow.
-
-### 2. Dataset & Training
-
-This page can:
-
-1. Check whether the fruit dataset already exists.
-2. Download the Kaggle dataset directly using `kagglehub`.
-3. Automatically locate `data.yaml` or `dataset.yaml`.
-4. Display the number of images, label files and fruit classes found.
-5. Select training epochs, image size, batch size and YOLO model.
-6. Train the fruit detector directly from Streamlit.
-7. Save the trained model as `best.pt`.
-8. Download `best.pt` after training.
-
-Default training model:
+The app does not train from the archive's incorrect detection YAML. Instead it:
 
 ```text
-yolo11n.pt
+_classes.csv
+    ↓
+Read image-level class labels
+    ↓
+Prepare train/ClassName, val/ClassName, test/ClassName folders
+    ↓
+YOLO classification training
+    ↓
+best.pt
 ```
 
-Default trained model location:
+For a quick test, use:
 
-```text
-runs/fruit_detection/train/weights/best.pt
-```
+- Model: `yolo11n-cls.pt`
+- Epochs: 3-5
+- Image size: 224
+- Batch size: 8
 
-### 3. Image Detection
+For a fuller experiment, increase the epochs.
 
-This page can:
+## Recognition workflow
 
-1. Use the `best.pt` produced by the training page, or upload another `.pt` model.
-2. Upload a JPG, JPEG, PNG, BMP or WEBP image.
-3. Change the confidence threshold.
-4. Detect fruits using YOLO.
-5. Show the original image and annotated result side by side.
-6. Display total fruits detected.
-7. Display the number of different fruit types.
-8. Display average confidence.
-9. Display a fruit-count table.
-10. Display bounding-box detection details.
-11. Download results as CSV.
-12. Download the annotated image as PNG.
+After training, open **Fruit Recognition**:
 
-## Application Flow
+1. Use the trained `best.pt` or upload a classification `.pt` model.
+2. Upload a fruit image.
+3. Click **Recognize Fruit**.
+4. Streamlit displays the predicted fruit, confidence, and Top-5 probabilities.
+5. Download the prediction results as CSV if needed.
 
-```text
-Kaggle Fruit Dataset
-        ↓
-Single Streamlit app.py
-        ↓
-Dataset Download / Check
-        ↓
-YOLO Training
-        ↓
-Trained best.pt
-        ↓
-Upload Fruit Image
-        ↓
-YOLO Detection
-        ↓
-Bounding Boxes + Fruit Classes
-        ↓
-Confidence Scores + Fruit Counts
-        ↓
-Streamlit Result + Download
-```
+## Why there are no bounding boxes
 
-## Important
-
-Streamlit is started with only:
-
-```bash
-streamlit run app.py
-```
-
-You do **not** need to run separate Python files for downloading, training or detection. All assignment functions are included in `app.py` and selected through the Streamlit sidebar.
+Bounding boxes require object-detection annotations such as YOLO `.txt` files containing class and box coordinates. The supplied archive has no such files; its `_classes.csv` files contain only image-level class labels. Creating fake bounding boxes would make the assignment technically incorrect.
