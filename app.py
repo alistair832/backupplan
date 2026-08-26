@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from io import BytesIO
 from pathlib import Path
+import shutil
 import tempfile
 
 import kagglehub
@@ -18,10 +19,17 @@ from ultralytics import YOLO
 # ============================================================
 DATASET_HANDLE = "kapturovalexander/fruits-by-yolo-fruits-detection"
 DATA_DIR = Path("data/fruits-yolo")
+RUNTIME_YAML = DATA_DIR / "streamlit_data.yaml"
 RUNS_DIR = Path("runs/fruit_detection")
 TRAIN_RUN_NAME = "train"
-DEFAULT_MODEL = "yolo11n.pt"
 DEFAULT_BEST_MODEL = RUNS_DIR / TRAIN_RUN_NAME / "weights" / "best.pt"
+
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+SPLIT_ALIASES = {
+    "train": {"train", "training"},
+    "val": {"val", "valid", "validation"},
+    "test": {"test", "testing"},
+}
 
 
 # ============================================================
@@ -35,34 +43,50 @@ st.set_page_config(
 
 st.title("🍎 Smart Fruit Detection and Counting System")
 st.caption(
-    "One Python file for dataset download, YOLO training, image detection, "
-    "fruit counting and result output in Streamlit."
+    "One Python file for dataset download, dataset-path repair, YOLO training, "
+    "image detection, fruit counting and result output in Streamlit."
 )
 
 
 # ============================================================
-# HELPER FUNCTIONS
+# DATASET HELPERS
 # ============================================================
-def find_dataset_yaml(search_root: Path) -> Path | None:
-    """Find the YOLO data.yaml/dataset.yaml inside the downloaded dataset."""
+def find_source_yaml(search_root: Path) -> Path | None:
+    """Find the original YOLO YAML supplied by the dataset."""
     if not search_root.exists():
         return None
 
-    candidates = sorted(search_root.rglob("data.yaml"))
-    candidates += sorted(search_root.rglob("dataset.yaml"))
-
+    candidates = [
+        path
+        for path in sorted(search_root.rglob("data.yaml"))
+        if path.resolve() != RUNTIME_YAML.resolve()
+    ]
+    candidates += [
+        path
+        for path in sorted(search_root.rglob("dataset.yaml"))
+        if path.resolve() != RUNTIME_YAML.resolve()
+    ]
     return candidates[0] if candidates else None
+
+
+def read_yaml(yaml_path: Path) -> dict:
+    with yaml_path.open("r", encoding="utf-8") as file:
+        return yaml.safe_load(file) or {}
 
 
 def read_dataset_names(yaml_path: Path) -> list[str]:
     """Read class names from a YOLO dataset YAML file."""
     try:
-        with yaml_path.open("r", encoding="utf-8") as file:
-            data = yaml.safe_load(file) or {}
-
+        data = read_yaml(yaml_path)
         names = data.get("names", [])
+
         if isinstance(names, dict):
-            return [str(names[key]) for key in sorted(names, key=lambda x: int(x))]
+            try:
+                keys = sorted(names, key=lambda item: int(item))
+            except (TypeError, ValueError):
+                keys = list(names)
+            return [str(names[key]) for key in keys]
+
         if isinstance(names, list):
             return [str(name) for name in names]
     except Exception:
@@ -71,52 +95,193 @@ def read_dataset_names(yaml_path: Path) -> list[str]:
     return []
 
 
-def download_dataset() -> Path:
-    """Download the public Kaggle dataset and return the YOLO YAML path."""
+def directory_has_images(directory: Path) -> bool:
+    if not directory.is_dir():
+        return False
+    return any(
+        path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+        for path in directory.iterdir()
+    )
+
+
+def classify_split_directory(directory: Path) -> str | None:
+    """Support train/images and images/train style YOLO folder layouts."""
+    name = directory.name.lower()
+    parent = directory.parent.name.lower()
+
+    if name == "images":
+        split_name = parent
+    elif parent == "images":
+        split_name = name
+    else:
+        return None
+
+    for canonical_name, aliases in SPLIT_ALIASES.items():
+        if split_name in aliases:
+            return canonical_name
+    return None
+
+
+def discover_split_image_dirs(search_root: Path) -> dict[str, Path]:
+    """Find the real train/val/test image directories in the downloaded dataset."""
+    found: dict[str, Path] = {}
+
+    if not search_root.exists():
+        return found
+
+    for directory in search_root.rglob("*"):
+        if not directory.is_dir():
+            continue
+
+        split = classify_split_directory(directory)
+        if split and split not in found and directory_has_images(directory):
+            found[split] = directory.resolve()
+
+    return found
+
+
+def count_images(directory: Path | None) -> int:
+    if directory is None or not directory.exists():
+        return 0
+    return sum(
+        1
+        for path in directory.rglob("*")
+        if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+    )
+
+
+def create_runtime_yaml(source_yaml: Path) -> Path:
+    """Create a corrected YOLO YAML with absolute paths to real image folders."""
+    splits = discover_split_image_dirs(DATA_DIR)
+
+    if "train" not in splits or "val" not in splits:
+        discovered = "\n".join(
+            f"- {path.relative_to(DATA_DIR)}"
+            for path in sorted(DATA_DIR.rglob("*"))
+            if path.is_dir()
+            and path.name.lower() in {"images", "train", "valid", "val", "test"}
+        )
+        raise FileNotFoundError(
+            "The dataset YAML exists, but usable train/validation image folders "
+            "could not be found. The download may be incomplete.\n\n"
+            f"Folders discovered:\n{discovered or '- none'}"
+        )
+
+    source_data = read_yaml(source_yaml)
+    names = source_data.get("names", [])
+
+    runtime_data: dict[str, object] = {
+        "train": str(splits["train"]),
+        "val": str(splits["val"]),
+        "names": names,
+    }
+
+    if "test" in splits:
+        runtime_data["test"] = str(splits["test"])
+
+    if isinstance(names, (list, dict)):
+        runtime_data["nc"] = len(names)
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with RUNTIME_YAML.open("w", encoding="utf-8") as file:
+        yaml.safe_dump(runtime_data, file, sort_keys=False, allow_unicode=True)
+
+    return RUNTIME_YAML
+
+
+def validate_runtime_yaml(yaml_path: Path) -> tuple[bool, str]:
+    """Check that train and validation image paths really exist."""
+    try:
+        data = read_yaml(yaml_path)
+        for split in ("train", "val"):
+            value = data.get(split)
+            if not value:
+                return False, f"Missing '{split}' path in {yaml_path}."
+
+            path = Path(str(value))
+            if not path.exists():
+                return False, f"{split} images not found: {path}"
+            if count_images(path) == 0:
+                return False, f"No image files found inside: {path}"
+
+        return True, "Dataset paths are valid."
+    except Exception as error:
+        return False, str(error)
+
+
+def prepare_existing_dataset() -> Path | None:
+    """Repair an already-downloaded dataset and return a valid runtime YAML."""
+    source_yaml = find_source_yaml(DATA_DIR)
+    if source_yaml is None:
+        return None
+
+    try:
+        runtime_yaml = create_runtime_yaml(source_yaml)
+        valid, _ = validate_runtime_yaml(runtime_yaml)
+        return runtime_yaml if valid else None
+    except Exception:
+        return None
+
+
+def download_dataset(force: bool = False) -> Path:
+    """Download the complete Kaggle dataset and build a corrected local YAML."""
+    if force and DATA_DIR.exists():
+        shutil.rmtree(DATA_DIR)
+
     DATA_DIR.parent.mkdir(parents=True, exist_ok=True)
 
     kagglehub.dataset_download(
         DATASET_HANDLE,
         output_dir=str(DATA_DIR),
+        force_download=force,
     )
 
-    yaml_path = find_dataset_yaml(DATA_DIR)
-    if yaml_path is None:
+    source_yaml = find_source_yaml(DATA_DIR)
+    if source_yaml is None:
         raise FileNotFoundError(
-            "Dataset downloaded, but no data.yaml or dataset.yaml was found."
+            "Dataset download completed, but data.yaml/dataset.yaml was not found."
         )
 
-    return yaml_path
+    runtime_yaml = create_runtime_yaml(source_yaml)
+    valid, message = validate_runtime_yaml(runtime_yaml)
+    if not valid:
+        raise FileNotFoundError(message)
+
+    return runtime_yaml
 
 
 def get_or_download_dataset() -> Path:
-    """Return an existing dataset YAML or download the dataset if missing."""
-    yaml_path = find_dataset_yaml(DATA_DIR)
-    if yaml_path is not None:
-        return yaml_path
-    return download_dataset()
+    """Return a verified local YAML, re-downloading an incomplete dataset if needed."""
+    existing = prepare_existing_dataset()
+    if existing is not None:
+        return existing
+
+    return download_dataset(force=True)
 
 
 def dataset_summary(yaml_path: Path) -> dict[str, object]:
-    """Create a small dataset summary for the Streamlit interface."""
     class_names = read_dataset_names(yaml_path)
-    image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+    data = read_yaml(yaml_path)
 
-    image_count = sum(
-        1
-        for path in DATA_DIR.rglob("*")
-        if path.is_file() and path.suffix.lower() in image_extensions
-    )
-    label_count = sum(1 for path in DATA_DIR.rglob("*.txt") if path.is_file())
+    train_path = Path(str(data["train"])) if data.get("train") else None
+    val_path = Path(str(data["val"])) if data.get("val") else None
+    test_path = Path(str(data["test"])) if data.get("test") else None
 
     return {
         "yaml": str(yaml_path),
         "classes": class_names,
-        "image_count": image_count,
-        "label_count": label_count,
+        "train_images": count_images(train_path),
+        "val_images": count_images(val_path),
+        "test_images": count_images(test_path),
+        "train_path": str(train_path) if train_path else "",
+        "val_path": str(val_path) if val_path else "",
+        "test_path": str(test_path) if test_path else "",
     }
 
 
+# ============================================================
+# YOLO HELPERS
+# ============================================================
 def train_model(
     yaml_path: Path,
     epochs: int,
@@ -124,11 +289,14 @@ def train_model(
     batch_size: int,
     pretrained_model: str,
 ) -> Path:
-    """Train YOLO using the Kaggle fruit dataset and return best.pt."""
-    model = YOLO(pretrained_model)
+    """Train YOLO using the corrected absolute-path YAML and return best.pt."""
+    valid, message = validate_runtime_yaml(yaml_path)
+    if not valid:
+        raise FileNotFoundError(message)
 
+    model = YOLO(pretrained_model)
     model.train(
-        data=str(yaml_path),
+        data=str(yaml_path.resolve()),
         epochs=epochs,
         imgsz=image_size,
         batch=batch_size,
@@ -149,7 +317,6 @@ def train_model(
 
 
 def save_uploaded_model(uploaded_model) -> Path:
-    """Save an uploaded .pt model to a temporary file for YOLO inference."""
     suffix = Path(uploaded_model.name).suffix or ".pt"
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     temp_file.write(uploaded_model.getbuffer())
@@ -159,7 +326,6 @@ def save_uploaded_model(uploaded_model) -> Path:
 
 
 def run_detection(model_path: Path, image: Image.Image, confidence: float):
-    """Run YOLO detection and return result data for Streamlit output."""
     model = YOLO(str(model_path))
     results = model.predict(
         source=image,
@@ -224,11 +390,10 @@ st.sidebar.code("streamlit run app.py", language=None)
 
 
 # ============================================================
-# HOME PAGE
+# HOME
 # ============================================================
 if page == "🏠 Home":
     st.subheader("Assignment Overview")
-
     st.markdown(
         """
         This assignment uses **Python, Ultralytics YOLO, KaggleHub and Streamlit**
@@ -246,16 +411,13 @@ if page == "🏠 Home":
     st.subheader("System Functions")
     st.markdown(
         """
-        1. Download the Kaggle fruit dataset directly.
-        2. Locate the YOLO `data.yaml` automatically.
+        1. Download and verify the Kaggle fruit dataset.
+        2. Automatically repair YOLO dataset paths for the current environment.
         3. Train a YOLO object-detection model.
         4. Use the trained `best.pt` model or upload another `.pt` model.
-        5. Upload a fruit image.
-        6. Detect and classify fruits in the image.
-        7. Draw bounding boxes and confidence scores.
-        8. Count each fruit type and total fruits.
-        9. Display detailed detection results.
-        10. Download the annotated image and CSV result.
+        5. Upload a fruit image and run detection.
+        6. Show bounding boxes, classes, confidence scores and fruit counts.
+        7. Download the annotated image and CSV result.
         """
     )
 
@@ -263,19 +425,19 @@ if page == "🏠 Home":
     st.code(
         """Kaggle Fruit Dataset
         ↓
-Download with KaggleHub
+Download + Verify Files
+        ↓
+Auto-detect Real train/valid/test Folders
+        ↓
+Create Corrected streamlit_data.yaml
         ↓
 YOLO Training
         ↓
-Trained best.pt
+best.pt
         ↓
 Upload Fruit Image
         ↓
-YOLO Detection
-        ↓
-Bounding Boxes + Fruit Class
-        ↓
-Confidence Score + Fruit Count
+Detection + Counting
         ↓
 Streamlit Output""",
         language=None,
@@ -283,42 +445,73 @@ Streamlit Output""",
 
 
 # ============================================================
-# DATASET + TRAINING PAGE
+# DATASET + TRAINING
 # ============================================================
 elif page == "📥 Dataset & Training":
     st.subheader("📥 Dataset Download and YOLO Training")
-
     st.info(
         "Dataset: Fruits by YOLO - Fruits Detection\n\n"
         "Kaggle handle: kapturovalexander/fruits-by-yolo-fruits-detection"
     )
 
-    existing_yaml = find_dataset_yaml(DATA_DIR)
+    existing_yaml = prepare_existing_dataset()
 
-    if existing_yaml:
-        st.success(f"Dataset is already available: {existing_yaml}")
+    if existing_yaml is not None:
+        valid, validation_message = validate_runtime_yaml(existing_yaml)
         summary = dataset_summary(existing_yaml)
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Images Found", summary["image_count"])
-        col2.metric("Label Files", summary["label_count"])
-        col3.metric("Classes", len(summary["classes"]))
+        if valid:
+            st.success("Dataset is ready and the image paths are valid.")
+        else:
+            st.error(validation_message)
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Train Images", summary["train_images"])
+        col2.metric("Validation Images", summary["val_images"])
+        col3.metric("Test Images", summary["test_images"])
+        col4.metric("Classes", len(summary["classes"]))
+
+        with st.expander("Show resolved dataset paths"):
+            st.code(
+                f"Training:   {summary['train_path']}\n"
+                f"Validation: {summary['val_path']}\n"
+                f"Test:       {summary['test_path'] or 'Not provided'}\n"
+                f"YOLO YAML:  {summary['yaml']}",
+                language=None,
+            )
 
         if summary["classes"]:
             st.write("**Detected classes:**")
             st.write(", ".join(summary["classes"]))
     else:
-        st.warning("Dataset has not been downloaded yet.")
+        st.warning(
+            "A complete dataset is not available yet, or the previous download "
+            "is incomplete. Click the button below to download/repair it."
+        )
 
-    if st.button("📥 Download / Check Dataset", type="primary"):
-        try:
-            with st.spinner("Downloading dataset from Kaggle..."):
-                yaml_path = get_or_download_dataset()
-            st.success("Dataset is ready.")
-            st.code(str(yaml_path), language=None)
-            st.rerun()
-        except Exception as error:
-            st.error(f"Dataset download failed: {error}")
+    left_button, right_button = st.columns(2)
+
+    with left_button:
+        if st.button("📥 Download / Check Dataset", type="primary", width="stretch"):
+            try:
+                with st.spinner("Checking dataset and repairing paths..."):
+                    yaml_path = get_or_download_dataset()
+                st.success("Dataset is complete and ready for YOLO.")
+                st.code(str(yaml_path), language=None)
+                st.rerun()
+            except Exception as error:
+                st.error(f"Dataset preparation failed: {error}")
+
+    with right_button:
+        if st.button("🔧 Force Re-download Dataset", width="stretch"):
+            try:
+                with st.spinner("Deleting incomplete copy and downloading all files again..."):
+                    yaml_path = download_dataset(force=True)
+                st.success("Dataset was downloaded again and repaired successfully.")
+                st.code(str(yaml_path), language=None)
+                st.rerun()
+            except Exception as error:
+                st.error(f"Dataset re-download failed: {error}")
 
     st.markdown("---")
     st.subheader("Train YOLO Model")
@@ -329,7 +522,7 @@ elif page == "📥 Dataset & Training":
             "Epochs",
             min_value=1,
             max_value=300,
-            value=30,
+            value=10,
             step=1,
         )
         image_size = st.selectbox("Image size", [320, 416, 512, 640], index=3)
@@ -343,17 +536,28 @@ elif page == "📥 Dataset & Training":
         )
 
     st.caption(
-        "Training can take significant time. A GPU is recommended. "
-        "For a quick assignment test, start with 5-10 epochs; for a fuller run, use 30-50+ epochs."
+        "For a quick assignment test, use 5-10 epochs. "
+        "For a fuller training run, use 30-50+ epochs. A GPU is recommended."
     )
 
     if st.button("🚀 Start Training", type="primary"):
         try:
-            with st.spinner("Preparing dataset..."):
+            with st.spinner("Preparing and validating dataset..."):
                 yaml_path = get_or_download_dataset()
+                valid, message = validate_runtime_yaml(yaml_path)
 
-            st.info(f"Training with: {yaml_path}")
-            st.info("YOLO training has started. Training messages will also appear in the terminal.")
+            if not valid:
+                raise FileNotFoundError(message)
+
+            st.success("Dataset paths validated.")
+            st.info(f"Training with corrected YAML: {yaml_path.resolve()}")
+
+            summary = dataset_summary(yaml_path)
+            st.code(
+                f"Train: {summary['train_path']}\n"
+                f"Val:   {summary['val_path']}",
+                language=None,
+            )
 
             with st.spinner("Training YOLO model..."):
                 best_model = train_model(
@@ -377,16 +581,20 @@ elif page == "📥 Dataset & Training":
                     file_name="best.pt",
                     mime="application/octet-stream",
                 )
+
         except Exception as error:
             st.error(f"Training failed: {error}")
+            st.info(
+                "If this is an 'images not found' error, click "
+                "'Force Re-download Dataset' once, then start training again."
+            )
 
 
 # ============================================================
-# IMAGE DETECTION PAGE
+# IMAGE DETECTION
 # ============================================================
 elif page == "🔍 Image Detection":
     st.subheader("🔍 Fruit Image Detection")
-
     st.write(
         "Upload a fruit image and use either the model trained by this app "
         "or upload your own trained `best.pt`."
@@ -437,7 +645,11 @@ elif page == "🔍 Image Detection":
         input_image = Image.open(uploaded_image).convert("RGB")
         st.image(input_image, caption="Uploaded Image", width="stretch")
 
-        if st.button("🍎 Detect Fruits", type="primary", disabled=selected_model_path is None):
+        if st.button(
+            "🍎 Detect Fruits",
+            type="primary",
+            disabled=selected_model_path is None,
+        ):
             if selected_model_path is None:
                 st.error("Please select or upload a trained YOLO model first.")
             else:
@@ -482,7 +694,9 @@ elif page == "🔍 Image Detection":
                         )
                         st.dataframe(count_df, width="stretch", hide_index=True)
                     else:
-                        st.warning("No fruit was detected at the selected confidence threshold.")
+                        st.warning(
+                            "No fruit was detected at the selected confidence threshold."
+                        )
 
                     st.subheader("Detection Details")
                     if not details_df.empty:
